@@ -6,6 +6,8 @@ import { Camera, Play, Upload } from "./icons";
 import { MAX_HANDS, TrackedHand, updateHandTracks } from "./hand-tracking";
 import { addTrackingFrame, createMotionMetricState, finalizeMotionResults, MotionResults } from "./motion-metrics";
 import { MotionResultsPanel } from "./motion-results";
+import { createInstrumentTrackingState, InstrumentTrack, MARKER_COLORS, MarkerColor, updateInstrumentTrack } from "./instrument-tracking";
+import { addInstrumentFrame, createInstrumentMetricState, finalizeInstrumentResults, InstrumentResults } from "./instrument-metrics";
 
 const WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 const MODEL_PATH = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
@@ -56,10 +58,45 @@ function drawHands(canvas: HTMLCanvasElement, video: HTMLVideoElement, hands: Tr
   });
 }
 
+function drawInstrument(canvas: HTMLCanvasElement, track: InstrumentTrack | null) {
+  if (!track) return;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const x = track.box.x * canvas.width;
+  const y = track.box.y * canvas.height;
+  const width = track.box.width * canvas.width;
+  const height = track.box.height * canvas.height;
+  const centerX = track.center.x * canvas.width;
+  const centerY = track.center.y * canvas.height;
+  const color = "#f472d0";
+
+  context.save();
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = Math.max(3, canvas.width / 260);
+  context.shadowColor = "rgba(0,0,0,.45)";
+  context.shadowBlur = 5;
+  context.strokeRect(x, y, width, height);
+  context.beginPath();
+  context.arc(centerX, centerY, Math.max(5, canvas.width / 150), 0, Math.PI * 2);
+  context.fill();
+  context.shadowBlur = 0;
+  context.font = `600 ${Math.max(12, canvas.width / 75)}px sans-serif`;
+  const label = "Needle Holder";
+  const labelWidth = context.measureText(label).width + 16;
+  const labelHeight = Math.max(24, canvas.width / 42);
+  context.fillStyle = "rgba(8,27,34,.88)";
+  context.fillRect(x, Math.max(0, y - labelHeight), labelWidth, labelHeight);
+  context.fillStyle = color;
+  context.fillText(label, x + 8, Math.max(labelHeight - 7, y - 7));
+  context.restore();
+}
+
 export function VideoInput() {
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const instrumentCanvasRef = useRef<HTMLCanvasElement>(null);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -69,6 +106,9 @@ export function VideoInput() {
   const lastTwoHandsRef = useRef(0);
   const tracksRef = useRef<TrackedHand[]>([]);
   const metricsRef = useRef(createMotionMetricState());
+  const instrumentTrackRef = useRef(createInstrumentTrackingState());
+  const markerColorRef = useRef<MarkerColor>("magenta");
+  const instrumentMetricsRef = useRef(createInstrumentMetricState());
   const cameraStartedAtRef = useRef(0);
   const modeRef = useRef<SourceMode>("empty");
   const [mode, setMode] = useState<SourceMode>("empty");
@@ -76,7 +116,10 @@ export function VideoInput() {
   const [trackingState, setTrackingState] = useState<TrackingState>("idle");
   const [message, setMessage] = useState("Upload a recording or use your camera to begin.");
   const [handCount, setHandCount] = useState(0);
-  const [results, setResults] = useState<MotionResults | null>(null);
+  const [results, setResults] = useState<(MotionResults & InstrumentResults) | null>(null);
+  const [instrumentMessage, setInstrumentMessage] = useState("Needle holder marker not visible.");
+  const [instrumentTracked, setInstrumentTracked] = useState(false);
+  const [markerColor, setMarkerColor] = useState<MarkerColor>("magenta");
 
   const stopLoop = useCallback(() => {
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
@@ -117,7 +160,8 @@ export function VideoInput() {
   const trackFrame = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.paused || video.ended) {
+    const instrumentCanvas = instrumentCanvasRef.current;
+    if (!video || !canvas || !instrumentCanvas || video.paused || video.ended) {
       animationRef.current = null;
       return;
     }
@@ -132,7 +176,32 @@ export function VideoInput() {
         const frame = updateHandTracks(tracksRef.current, result, now);
         tracksRef.current = frame.tracks;
         drawHands(canvas, video, frame.hands);
+        const sampleWidth = 320;
+        const sampleHeight = Math.max(1, Math.round(sampleWidth * video.videoHeight / video.videoWidth));
+        if (instrumentCanvas.width !== sampleWidth || instrumentCanvas.height !== sampleHeight) {
+          instrumentCanvas.width = sampleWidth;
+          instrumentCanvas.height = sampleHeight;
+        }
+        const instrumentContext = instrumentCanvas.getContext("2d", { willReadFrequently: true });
+        let instrumentTrack: InstrumentTrack | null = null;
+        if (instrumentContext) {
+          instrumentContext.drawImage(video, 0, 0, sampleWidth, sampleHeight);
+          const pixels = instrumentContext.getImageData(0, 0, sampleWidth, sampleHeight);
+          const instrumentFrame = updateInstrumentTrack(instrumentTrackRef.current, pixels, now, markerColorRef.current);
+          instrumentTrackRef.current = instrumentFrame.state;
+          instrumentTrack = instrumentFrame.track;
+          setInstrumentTracked(Boolean(instrumentTrack));
+          if (instrumentTrack) {
+            setInstrumentMessage("Needle holder tracked");
+          } else if (instrumentFrame.remembered || instrumentFrame.rejected) {
+            setInstrumentMessage("Needle holder tracking limited — keep the selected marker visible and reduce occlusion.");
+          } else {
+            setInstrumentMessage("Needle holder marker not visible.");
+          }
+        }
+        drawInstrument(canvas, instrumentTrack);
         addTrackingFrame(metricsRef.current, frame.hands, video.currentTime, video.videoWidth, video.videoHeight);
+        addInstrumentFrame(instrumentMetricsRef.current, instrumentTrack, video.currentTime, video.videoWidth, video.videoHeight);
         const count = frame.detectedCount;
         setHandCount(count);
         if (count === 2 && frame.rejectedCount === 0) {
@@ -171,12 +240,21 @@ export function VideoInput() {
     lastSeenRef.current = performance.now();
     lastTwoHandsRef.current = 0;
     tracksRef.current = [];
+    instrumentTrackRef.current = createInstrumentTrackingState();
     animationRef.current = requestAnimationFrame(trackFrame);
   }, [stopLoop, trackFrame]);
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  function chooseMarkerColor(color: MarkerColor) {
+    markerColorRef.current = color;
+    setMarkerColor(color);
+    instrumentTrackRef.current = createInstrumentTrackingState();
+    setInstrumentTracked(false);
+    setInstrumentMessage("Needle holder marker not visible.");
+  }
 
   useEffect(() => () => {
     stopLoop();
@@ -195,6 +273,7 @@ export function VideoInput() {
     setMode("upload");
     setResults(null);
     metricsRef.current = createMotionMetricState();
+    instrumentMetricsRef.current = createInstrumentMetricState();
     setFileName(file.name);
     setHandCount(0);
     setTrackingState("loading");
@@ -218,6 +297,7 @@ export function VideoInput() {
     setMode("camera");
     setResults(null);
     metricsRef.current = createMotionMetricState();
+    instrumentMetricsRef.current = createInstrumentMetricState();
     setFileName("");
     setHandCount(0);
     setTrackingState("loading");
@@ -258,7 +338,10 @@ export function VideoInput() {
     setTrackingState("ready");
     setMessage("Video finished.");
     const duration = videoRef.current?.duration;
-    setResults(finalizeMotionResults(metricsRef.current, Number.isFinite(duration) ? duration ?? 0 : 0));
+    setResults({
+      ...finalizeMotionResults(metricsRef.current, Number.isFinite(duration) ? duration ?? 0 : 0),
+      ...finalizeInstrumentResults(instrumentMetricsRef.current),
+    });
   }
 
   function finishCameraAnalysis() {
@@ -266,7 +349,10 @@ export function VideoInput() {
     stopLoop();
     videoRef.current?.pause();
     stopCamera();
-    setResults(finalizeMotionResults(metricsRef.current, duration));
+    setResults({
+      ...finalizeMotionResults(metricsRef.current, duration),
+      ...finalizeInstrumentResults(instrumentMetricsRef.current),
+    });
     setTrackingState("ready");
     setMessage("Camera analysis finished.");
   }
@@ -282,6 +368,10 @@ export function VideoInput() {
     setMessage("Upload a recording or use your camera to begin.");
     tracksRef.current = [];
     metricsRef.current = createMotionMetricState();
+    instrumentTrackRef.current = createInstrumentTrackingState();
+    instrumentMetricsRef.current = createInstrumentMetricState();
+    setInstrumentTracked(false);
+    setInstrumentMessage("Needle holder marker not visible.");
     cameraStartedAtRef.current = 0;
     const canvas = canvasRef.current;
     canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
@@ -294,7 +384,7 @@ export function VideoInput() {
 
   const statusColor = trackingState === "error" ? "bg-red-500" : trackingState === "lost" ? "bg-amber-400" : trackingState === "tracking" ? "bg-emerald-400" : "bg-slate-400";
 
-  if (results) return <MotionResultsPanel results={results} onReset={resetAnalysis} />;
+  if (results) return <MotionResultsPanel results={results} onReset={resetAnalysis} replayUrl={mode === "upload" ? objectUrlRef.current : null} />;
 
   return (
     <div className="mt-8 grid gap-5 lg:grid-cols-[1fr_15rem]">
@@ -309,6 +399,7 @@ export function VideoInput() {
           onEnded={finishUploadedVideo}
         />
         <canvas ref={canvasRef} className={`pointer-events-none absolute inset-0 z-20 h-full w-full object-contain ${mode === "empty" ? "hidden" : "block"}`} aria-hidden="true" />
+        <canvas ref={instrumentCanvasRef} className="hidden" aria-hidden="true" />
         {mode === "empty" && (
           <div className="relative z-10 max-w-sm p-6 text-center text-white">
             <span className="mx-auto grid h-16 w-16 place-items-center rounded-2xl border border-white/15 bg-white/10"><Play className="h-7 w-7" /></span>
@@ -321,6 +412,11 @@ export function VideoInput() {
             <span className={`h-2 w-2 rounded-full ${statusColor}`} /> {message}
           </div>
         )}
+        {mode !== "empty" && (
+          <div className="absolute left-3 top-14 z-30 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-full border border-white/10 bg-[#081b22]/80 px-3 py-2 text-xs font-medium text-white backdrop-blur">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${instrumentTracked ? "bg-fuchsia-400" : "bg-amber-400"}`} /> {instrumentMessage}
+          </div>
+        )}
         <div className="absolute bottom-3 right-3 z-30 flex gap-2 text-[11px] font-semibold text-white">
           {handCount > 0 && <span className="rounded-full bg-[#081b22]/75 px-2.5 py-1.5 backdrop-blur">{handCount}/2 hands</span>}
           <span className="rounded-full bg-[#081b22]/75 px-2.5 py-1.5 backdrop-blur">On-device</span>
@@ -328,7 +424,25 @@ export function VideoInput() {
       </div>
 
       <aside className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/85 p-4 lg:p-5">
-        <div><h2 className="font-semibold">Add a video</h2><p className="mt-1 text-xs leading-5 text-slate-500">Choose how you want to capture your practice.</p></div>
+        <div className="rounded-xl bg-fuchsia-50 p-3 text-xs leading-5 text-fuchsia-800">
+          <span className="font-semibold">1. Choose marker color</span>
+          <p className="mt-1">Pick the bright color attached to your needle holder. Keep other objects of that color out of frame.</p>
+          <div className="mt-3 grid grid-cols-2 gap-2" aria-label="Marker color">
+            {MARKER_COLORS.map((color) => (
+              <button
+                key={color.id}
+                type="button"
+                onClick={() => chooseMarkerColor(color.id)}
+                aria-pressed={markerColor === color.id}
+                className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] font-semibold transition ${markerColor === color.id ? "border-fuchsia-400 bg-white text-fuchsia-900 shadow-sm" : "border-fuchsia-100 bg-white/60 text-fuchsia-700 hover:border-fuchsia-300"}`}
+              >
+                <span className="h-3 w-3 shrink-0 rounded-full ring-1 ring-black/10" style={{ backgroundColor: color.swatch }} />
+                {color.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div><h2 className="font-semibold">2. Add a video</h2><p className="mt-1 text-xs leading-5 text-slate-500">Choose how you want to capture your practice.</p></div>
         <input ref={inputRef} className="sr-only" type="file" accept="video/*" onChange={handleFile} />
         <button type="button" onClick={() => inputRef.current?.click()} className="primary-button w-full"><Upload /> Upload Video</button>
         <button type="button" onClick={useCamera} className="secondary-button w-full"><Camera /> Use Camera</button>
