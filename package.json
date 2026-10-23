@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "node --test tests/*.test.mjs",
     "test:tracking": "node --test tests/hand-tracking.test.mjs",
     "test:metrics": "node --test tests/motion-metrics.test.mjs",
     "test:instrument": "node --test tests/instrument-tracking.test.mjs"
