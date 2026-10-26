@@ -1,5 +1,7 @@
 # SurgiSight
 
+[**Live demo**](https://surgi-sight.vercel.app/) · [Source code](https://github.com/suryaanand1/SurgiSight)
+
 SurgiSight is a browser-based computer-vision MVP that turns a recorded surgical practice task into transparent, objective motion measurements for review.
 
 ## Why it exists
@@ -84,7 +86,7 @@ Prerequisites:
 - A modern browser with camera support if using live capture
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/suryaanand1/SurgiSight.git
 cd surgisight
 pnpm install
 pnpm dev
